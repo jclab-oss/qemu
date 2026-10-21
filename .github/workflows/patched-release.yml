@@ -54,7 +54,6 @@ env:
   # patchew mbox URLs, applied in order with "git am -3".  Patches already
   # present in the tag (e.g. backported to stable) are skipped by git am.
   PATCHES: |
-    https://patchew.org/QEMU/20260812082814.27217-3-mohamed@unpredictable.fr/mbox
     https://patchew.org/QEMU/20260421205749.55060-1-mohamed@unpredictable.fr/mbox
 
 jobs:
