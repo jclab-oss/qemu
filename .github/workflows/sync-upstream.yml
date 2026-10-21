@@ -1,0 +1,101 @@
+# Mirror upstream QEMU (master, stable-*, tags) into this repository once a
+# day and build a patched release for every newly appeared release tag.
+#
+# NOTE: this file must live on the repository's *default branch*, which must
+# NOT be one of the mirrored branches (master / stable-*), otherwise the next
+# sync would overwrite it.  Use a dedicated branch (e.g. "ci") as default.
+
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+# All writes use a short-lived GitHub App token (QEMU_BOT_*), not GITHUB_TOKEN.
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://gitlab.com/qemu-project/qemu.git
+  # Only new tags matching this pattern trigger a patched release
+  # (release tags only, no -rcN).
+  AUTO_TAG_PATTERN: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+  # The patch set does not apply to older series (e.g. v10.0.x).
+  AUTO_TAG_MIN_VERSION: '11.0.0'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tags: ${{ steps.mirror.outputs.new_tags }}
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.QEMU_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.QEMU_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          # Upstream commits may touch .github/workflows.
+          permission-workflows: write
+
+      - name: Mirror upstream refs
+        id: mirror
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          git init -q --bare mirror.git
+          cd mirror.git
+          git remote add origin "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote add upstream "$UPSTREAM_URL"
+
+          before=$(git ls-remote --tags --refs origin | sed 's#.*refs/tags/##' | sort)
+
+          git fetch --no-tags upstream \
+            '+refs/heads/master:refs/heads/master' \
+            '+refs/heads/stable-*:refs/heads/stable-*' \
+            '+refs/tags/*:refs/tags/*'
+
+          # No --force: a mirrored branch that diverged should fail loudly.
+          git push origin \
+            'refs/heads/master:refs/heads/master' \
+            'refs/heads/stable-*:refs/heads/stable-*' \
+            'refs/tags/*:refs/tags/*'
+
+          after=$(git for-each-ref --format='%(refname:strip=2)' refs/tags | sort)
+
+          new_tags=()
+          if [ -z "$before" ]; then
+            echo "::notice::First sync (no tags in origin before); not triggering releases."
+          else
+            for t in $(comm -13 <(echo "$before") <(echo "$after") | grep -E "$AUTO_TAG_PATTERN" || true); do
+              v=${t#v}
+              if [ "$(printf '%s\n' "$AUTO_TAG_MIN_VERSION" "$v" | sort -V | head -n1)" = "$AUTO_TAG_MIN_VERSION" ]; then
+                new_tags+=("$t")
+              else
+                echo "::notice::Skipping $t (older than $AUTO_TAG_MIN_VERSION)"
+              fi
+            done
+          fi
+
+          json=$(printf '%s\n' "${new_tags[@]}" | jq -R . | jq -cs 'map(select(length > 0))')
+          echo "New tags: $json"
+          echo "new_tags=$json" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: sync
+    if: needs.sync.outputs.new_tags != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.sync.outputs.new_tags) }}
+    uses: ./.github/workflows/patched-release.yml
+    with:
+      tag: ${{ matrix.tag }}
+    secrets: inherit
