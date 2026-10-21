@@ -238,8 +238,11 @@ jobs:
           set -euo pipefail
           git config --global --add safe.directory '*'
           mkdir build && cd build
+          # qemu-ga is a guest tool; it also needs windmc, which the LLVM-only
+          # CLANGARM64 environment does not provide.
           ../configure --target-list="$TARGETS" \
-            --enable-whpx --enable-slirp --disable-docs --disable-werror
+            --enable-whpx --enable-slirp --disable-docs --disable-werror \
+            --disable-guest-agent
           make -j"$(nproc)"
           make install DESTDIR="$PWD/stage"
 
